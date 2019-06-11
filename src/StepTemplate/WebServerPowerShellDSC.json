@@ -1,0 +1,67 @@
+{
+  "Id": "ActionTemplates-101",
+  "Name": "Web Server PowerShell DSC",
+  "Description": "Configures a web server based on information from a configuration data file.",
+  "ActionType": "Octopus.TentaclePackage",
+  "Version": 3,
+  "CommunityActionTemplateId": null,
+  "Packages": [
+    {
+      "Id": "03330b56-0fd1-44d0-82f7-446cc233939a",
+      "Name": "",
+      "PackageId": "#{DSCPackageId}",
+      "FeedId": "feeds-builtin",
+      "AcquisitionLocation": "Server",
+      "Properties": {}
+    }
+  ],
+  "Properties": {
+    "Octopus.Action.EnabledFeatures": "Octopus.Features.CustomScripts,Octopus.Features.SubstituteInFiles",
+    "Octopus.Action.Package.AutomaticallyRunConfigurationTransformationFiles": "True",
+    "Octopus.Action.Package.AutomaticallyUpdateAppSettingsAndConnectionStrings": "True",
+    "Octopus.Action.SubstituteInFiles.Enabled": "True",
+    "Octopus.Action.SubstituteInFiles.TargetFiles": "#{DataFileName}",
+    "Octopus.Action.CustomScripts.Deploy.ps1": "Configuration WebServerConfiguration\n{\n    Import-DscResource -ModuleName 'PSDesiredStateConfiguration'\n    Import-DscResource -Module xWebAdministration\n\n\tNode $AllNodes.NodeName\n    {\n\t\t# loop through features list and install\n        ForEach($Feature in $Node.WindowsFeatures)\n        {\n            WindowsFeature \"$($Feature.Name)\"\n            {\n                Ensure = $Feature.Ensure\n                Name = $Feature.Name\n\t\t\t\tSource = $Feature.Source # Needed if for some reason the resource isn't on the OS already and needs to be retrieved from something like a mounted ISO\n            }\n        }\n\n        # stop default web site\n        xWebSite DefaultSite\n        {\n            Ensure = \"Absent\"\n            Name = \"Default Web Site\"\n            State = \"Stopped\"\n            PhysicalPath = \"c:\\inetpub\\wwwroot\"\n\t\t\tDependsOn = \"[WindowsFeature]Web-Server\"\n        }\n\n        # loop through list of default app pools and stop them\n        ForEach($Pool in @(\".NET v2.0\", `\n        \".NET v2.0 Classic\", `\n        \".NET v4.5\", `\n        \".NET v4.5 Classic\", `\n        \"Classic .NET AppPool\", `\n        \"DefaultAppPool\"))\n        {\n            xWebAppPool $Pool\n            {\n                Name = $Pool\n                State = \"Stopped\"\n\t\t\t\tEnsure = \"Absent\"\t\t\t\t \n\t\t\t\tDependsOn = \"[WindowsFeature]Web-Server\"\n            }\n        }\n\n        # make sure log path exists\n        File LoggingPath\n        {\n            Type = \"Directory\"\n            DestinationPath = $Node.LogPath\n            Ensure = \"Present\"\n        }\n\n        # loop through the sites\n        ForEach($Site in $Node.Sites)\n        {\n            # create the folder\n            File $Site.Name\n            {\n                Type = \"Directory\"\n                DestinationPath = \"$($Node.Rootpath)\\$($Site.Name)\"\n                Ensure = $(if ($Site.Ensure) {$Site.Ensure} else {\"Present\"})\n            }\n\n            # create the site app pool\n            xWebAppPool $Site.Name\n            {\n                #Name = $Site.Name\n\t\t\t\tName = $(if($Site.Pool.Name) {$Site.Pool.Name} else {$Site.Name})\n                Ensure = $(if ($Site.Ensure) {$Site.Ensure} else {\"Present\"})\n                ManagedPipelineMode = \"$($Site.Pool.Pipeline)\"\n                managedRuntimeVersion = \"$($Site.Pool.RuntimeVersion)\"\n\t\t\t\tState = $Site.Pool.State\n\t\t\t\tIdentityType = $(if ($Site.Pool.IdentityType) {$Site.Pool.IdentityType} else {\"ApplicationPoolIdentity\"})\n\t\t\t\tCredential = $(if (($Credentials | Where-Object {$_.Name -eq \"$($Site.Name).AppPoolIdentity\"}) -ne $null) {($Credentials | Where-Object {$_.Name -eq \"$($Site.Name).AppPoolIdentity\"}).Credential} else {$null} )\n            }\n            \n            # create the site\n            xWebSite $Site.Name\n            {\n                Ensure = $(if ($Site.Ensure) {$Site.Ensure} else {\"Present\"})\n                Name = $Site.Name\n                State = $Site.State\n                PhysicalPath = \"$($Node.Rootpath)\\$($Site.Name)\"\n                ApplicationPool = $(if($Site.Pool.Name) {$Site.Pool.Name} else {$Site.Name})\n                BindingInfo = @(\n                    # loop through the binding information\n                    ForEach($BindingInfo in $Site.BindingInformation)\n                    {\n                    # check for keyword CertificateStoreName\n                        MSFT_xWebBindingInformation\n                        {\n                            Port = $BindingInfo.Port\n                            IPAddress  = $BindingInfo.IPAddress\n                            Protocol = $BindingInfo.Protocol\n                        }                   \n                    }\n                )\n\n\t\t\t\t# Set logging path\n                LogPath = $Node.LogPath\n\n\t\t\t\t# Set Authentication mechanisms\n\t\t\t\tAuthenticationInfo = MSFT_xWebAuthenticationInformation {\n\t\t\t\t\tAnonymous = $Site.Authentication.Anonymous\n\t\t\t\t\tBasic = $Site.Authentication.Basic\n\t\t\t\t\tDigest = $Site.Authentication.Digest\n\t\t\t\t\tWindows = $Site.Authentication.Windows\n\t\t\t\t}\n            }\n\n            # loop through site application collection and create folders\n            ForEach($Application in $Site.Applications)\n            {\n                File \"$($Site.Name)-$($Application.Name)\"\n                {\n                    Type = \"Directory\"\n                    DestinationPath = \"$($Node.Rootpath)\\$($Site.Name)\\$($Application.FolderName)\"\n                    Ensure = $(if ($Application.Ensure) {$Application.Ensure} else {\"Present\"})\n\t\t\t\t\tForce = $true\n                }\n\n\n                # create application pool\n                xWebAppPool $Application.Name\n                {\n                    Name = $(if($Application.Pool.Name) {$Application.Pool.Name} else {$Application.Name})\n                    Ensure = $(if ($Application.Ensure) {$Application.Ensure} else {\"Present\"})\n                    State = $Application.Pool.State\n                    ManagedPipelineMode = $Application.Pool.Pipeline\n                    managedRuntimeVersion = \"$($Application.Pool.RuntimeVersion)\"\n\t\t\t\t\tidleTimeout = $Application.Pool.IdleTimeout\n\t\t\t\t\trestartTimeLimit = $Application.Pool.RestartTimeLimit\n\t\t\t\t\tIdentityType = $(if ($Application.Pool.IdentityType) {$Application.Pool.IdentityType} else {\"ApplicationPoolIdentity\"})\n\t\t\t\t\tCredential = $(if (($Credentials | Where-Object {$_.Name -eq \"$($Application.Name).AppPoolIdentity\"}) -ne $null) {($Credentials | Where-Object {$_.Name -eq \"$($Application.Name).AppPoolIdentity\"}).Credential} else {$null} )\n                }\n\n                # create application\n                xWebApplication $Application.Name\n                {\n                    #Name = $Application.Name\n\t\t\t\t\tName = $(if($Application.Name -eq $Application.FolderName) {$Application.Name} else {$Application.FolderName.Replace(\"\\\", \"/\")})\n                    Website = $Site.Name\n                    WebAppPool = $(if($Application.Pool.Name) {$Application.Pool.Name} else {$Application.Name})\n                    PhysicalPath = \"$($Node.Rootpath)\\$($Site.Name)\\$($Application.FolderName)\"\n                    Ensure = $(if ($Application.Ensure) {$Application.Ensure} else {\"Present\"})\n\t\t\t\t\t# Set Authentication mechanisms\n\t\t\t\t\tAuthenticationInfo = MSFT_xWebApplicationAuthenticationInformation {\n\t\t\t\t\t\tAnonymous = $Application.Authentication.Anonymous\n\t\t\t\t\t\tBasic = $Application.Authentication.Basic\n\t\t\t\t\t\tDigest = $Application.Authentication.Digest\n\t\t\t\t\t\tWindows = $Application.Authentication.Windows\n\t\t\t\t\t}\n                }\n            }\n        }\n    }\n}\n\n\n# create credential object\n$Credentials = @()\n\n# set location for mof files\nSet-Location -Path $DSCTempPath\n\n# get the configuration data file\n$ConfigurationDataFile = (Get-ChildItem -Path $OctopusParameters[\"Octopus.Action.Package.InstallationDirectoryPath\"] | Where-Object {$_.Name -eq $DataFileName}).FullName\n\n# Display which file it's using\nWrite-Host \"The configuration data file is: $ConfigurationDataFile\"\n\n# Execute and generate .MOF file\nWebServerConfiguration -ConfigurationData $ConfigurationDataFile -OutputPath $DSCTempPath\n\n# Configure the server using the MOF file\nStart-DscConfiguration -Wait -Verbose -Path $DSCTempPath\n",
+    "Octopus.Action.Package.PackageId": "#{DSCPackageId}",
+    "Octopus.Action.Package.FeedId": "feeds-builtin",
+    "Octopus.Action.Package.DownloadOnTentacle": "False"
+  },
+  "Parameters": [
+    {
+      "Id": "5e2078d7-1859-4e2d-bf02-dbb8f1c357b5",
+      "Name": "DSCTempPath",
+      "Label": "DSC Path",
+      "HelpText": "Path to generated .MOF file",
+      "DefaultValue": "",
+      "DisplaySettings": {
+        "Octopus.ControlType": "SingleLineText"
+      }
+    },
+    {
+      "Id": "eedcdeaa-5587-42e2-94b6-6c87f3afd6b6",
+      "Name": "DataFileName",
+      "Label": "Configuration Data file name",
+      "HelpText": "Name of the .psd1 file that contains the node configuration data.",
+      "DefaultValue": "",
+      "DisplaySettings": {
+        "Octopus.ControlType": "SingleLineText"
+      }
+    },
+    {
+      "Id": "1e5396eb-b372-4588-9bb5-0d53ef77e621",
+      "Name": "DSCPackageId",
+      "Label": "Package ID",
+      "HelpText": "Name of the package that contains the .psd1 file.",
+      "DefaultValue": "",
+      "DisplaySettings": {
+        "Octopus.ControlType": "SingleLineText"
+      }
+    }
+  ],
+  "SpaceId": "Spaces-1",
+  "$Meta": {
+    "ExportedAt": "2019-06-10T23:34:18.540Z",
+    "OctopusVersion": "2019.5.8",
+    "Type": "ActionTemplate"
+  }
+}
